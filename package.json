@@ -1,0 +1,43 @@
+{
+	"name": "pi-silent-update",
+	"version": "0.1.0",
+	"description": "Pi extension: keep Pi and its packages current silently, once per machine, and surface every failure inside Pi",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"update"
+	],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/vitalNohj/pi-silent-update.git"
+	},
+	"type": "module",
+	"files": [
+		"index.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-coding-agent": {
+			"optional": true
+		}
+	},
+	"scripts": {
+		"test": "node --import jiti/register --test --test-concurrency=2 test/*.test.ts"
+	},
+	"engines": {
+		"node": ">=20.6"
+	},
+	"devDependencies": {
+		"jiti": "^2.7.0"
+	}
+}
