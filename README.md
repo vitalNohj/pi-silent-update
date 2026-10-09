@@ -23,7 +23,7 @@ A successful update shows one line, for example `Updated is-number 6.0.0 -> 7.0.
 pi install git:github.com/vitalNohj/pi-silent-update
 ```
 
-It works only in interactive Pi sessions, and it does not delay startup.
+It never delays startup. If Pi exits before a background update finishes, for example after a `pi -p` run, the next session reports the result.
 
 ## Command
 
