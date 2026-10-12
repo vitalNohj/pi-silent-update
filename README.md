@@ -17,6 +17,18 @@ On every Pi start:
 
 A successful update shows one line, for example `Updated is-number 6.0.0 -> 7.0.0; restart Pi to use it`. If nothing changed, you see nothing.
 
+## Embedded Pi (pi-gui and friends)
+
+A desktop app such as [pi-gui](https://github.com/minghinmatthewlam/pi-gui) can load this extension from the shared `~/.pi/agent` but run it inside its own bundled copy of Pi. That embedded copy is updated by the app itself, never by `pi update --all`, which only reaches the `pi` found on `PATH` (the terminal Pi).
+
+When a check is due, the extension compares the Pi it is running in with the install behind the `pi` command on `PATH` (found by real-pathing the executable and walking up to its package root — file lookups only, no extra processes):
+
+- **System Pi.** The running copy is the one on `PATH`; behavior is exactly as before.
+- **Embedded Pi, `pi` on `PATH`.** The embedded copy itself is never checked against pi.dev and never causes a warning — its app updates it. Instead the check compares pi.dev's latest with the **system** Pi's version, and the update job (which runs `pi update --all` with the system `pi`) is verified against the system install. Shared packages in the agent dir are updated and verified as usual. `/silent-update` reports, for example: `running inside an embedded Pi 0.87.1 at …; system Pi 1.1.0 at … is the one 'pi update --all' keeps updated`. This also keeps terminal Pi current while you work in pi-gui.
+- **Embedded Pi, no `pi` on `PATH`.** Packages and Pi alike could not be updated, so when something is out of date the extension records one clear failure — `no 'pi' command on PATH, so updates cannot run; install the Pi CLI or set PI_SILENT_UPDATE_CMD` — shown inside Pi like any other failure. With nothing to update it stays silent.
+
+A custom `PI_SILENT_UPDATE_CMD` is trusted to target whatever it targets, so the decision above does not apply and behavior is unchanged.
+
 ## Install
 
 ```sh
@@ -27,7 +39,7 @@ It never delays startup. If Pi exits before a background update finishes, for ex
 
 ## Command
 
-`/silent-update` runs a check now, ignoring the throttle, and prints the current state: last check, last update, last result, and any recorded failure.
+`/silent-update` runs a check now, ignoring the throttle, and prints the current state: which Pi is running (the system Pi, or an embedded copy with its version and directory) and which Pi the update command keeps current, plus last check, last update, last result, and any recorded failure.
 
 ## Settings
 
@@ -50,6 +62,7 @@ Every failure is written to the state file, including:
 - a package still older than expected after the update
 - a lock left from a run that never finished (it is treated as broken after 1h, removed, and reported)
 - an update that could not be started
+- no `pi` command on `PATH` while something is out of date (for example, an embedded Pi in a desktop app with the Pi CLI not installed)
 
 While a failure is recorded, every Pi session shows a warning naming what failed and the command to run by hand, and the status line shows `⚠ update failed: /silent-update`:
 

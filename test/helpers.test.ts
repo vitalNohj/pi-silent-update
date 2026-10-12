@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 import {
 	acquireLock,
@@ -11,12 +11,15 @@ import {
 	clearFailure,
 	compareVersions,
 	isDue,
+	isEmbedded,
 	LOCK_DIR,
 	lockState,
+	PI_PACKAGE_NAME,
 	readState,
 	recordFailure,
 	releaseLock,
 	STALE_LOCK_MS,
+	systemPiDir,
 	throttleMs,
 	verify,
 	writeState,
@@ -24,6 +27,16 @@ import {
 
 const tmp = () => mkdtempSync(join(tmpdir(), "pisu-test-"));
 const H = 3_600_000;
+
+/** A fake Pi install: <root>/lib/pi-coding-agent with a package.json and an executable dist/cli.js. */
+const makePi = (root: string, version = "1.1.0") => {
+	const pkg = join(root, "lib", "pi-coding-agent");
+	mkdirSync(join(pkg, "dist"), { recursive: true });
+	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: PI_PACKAGE_NAME, version }));
+	writeFileSync(join(pkg, "dist", "cli.js"), "#!/bin/sh\n");
+	chmodSync(join(pkg, "dist", "cli.js"), 0o755);
+	return pkg;
+};
 
 test("compareVersions orders releases and prereleases like semver", () => {
 	const sorted = ["0.9.9", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "1.0.1", "1.1.0", "1.10.0", "2.0.0"];
@@ -145,4 +158,39 @@ test("verify: anything still older than the target is a failure", () => {
 	installed["/g"] = "2.0.0";
 	installed["/git"] = "b".repeat(40);
 	assert.deepEqual(verify({ items, command: "x" }, (i) => installed[i.path]), []);
+});
+
+test("systemPiDir: finds the Pi package behind a symlinked `pi` on PATH", () => {
+	const root = tmp();
+	const pkg = makePi(root);
+	mkdirSync(join(root, "bin"));
+	symlinkSync(join(pkg, "dist", "cli.js"), join(root, "bin", "pi"));
+	const env = { PATH: [join(root, "bin"), "/definitely/not/on/path"].join(delimiter) };
+	assert.equal(systemPiDir(env, "linux"), realpathSync(pkg));
+});
+
+test("systemPiDir: a `pi` that is not a Pi install is skipped; a real one later on PATH wins", () => {
+	const root = tmp();
+	mkdirSync(join(root, "bin"), { recursive: true });
+	writeFileSync(join(root, "bin", "pi"), "#!/bin/sh\n");
+	chmodSync(join(root, "bin", "pi"), 0o755);
+	writeFileSync(join(root, "package.json"), JSON.stringify({ name: "not-pi", bin: { pi: "bin/pi" } }));
+	const pkg = makePi(root);
+	symlinkSync(join(pkg, "dist", "cli.js"), join(root, "lib", "pi"));
+	const env = { PATH: [join(root, "bin"), join(root, "lib")].join(delimiter) };
+	assert.equal(systemPiDir(env, "linux"), realpathSync(pkg));
+	// Without the real Pi later on PATH, the impostor yields nothing.
+	assert.equal(systemPiDir({ PATH: join(root, "bin") }, "linux"), undefined);
+});
+
+test("systemPiDir: no `pi` anywhere on PATH returns undefined", () => {
+	assert.equal(systemPiDir({ PATH: join(tmp(), "missing-bin") }, "linux"), undefined);
+	assert.equal(systemPiDir({ PATH: "" }, "linux"), undefined);
+});
+
+test("isEmbedded: running copy differs from the PATH Pi; a custom command is trusted", () => {
+	assert.equal(isEmbedded("/app/pi", {}, "/app/pi"), false);
+	assert.equal(isEmbedded("/app/pi", {}, "/system/pi"), true);
+	assert.equal(isEmbedded("/app/pi", {}, undefined), true);
+	assert.equal(isEmbedded("/app/pi", { PI_SILENT_UPDATE_CMD: "my update cmd" }, "/system/pi"), false);
 });
