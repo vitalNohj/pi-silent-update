@@ -25,7 +25,9 @@ When a check is due, the extension compares the Pi it is running in with the ins
 
 - **System Pi.** The running copy is the one on `PATH`; behavior is exactly as before.
 - **Embedded Pi, `pi` on `PATH`.** The embedded copy itself is never checked against pi.dev and never causes a warning — its app updates it. Instead the check compares pi.dev's latest with the **system** Pi's version, and the update job (which runs `pi update --all` with the system `pi`) is verified against the system install. Shared packages in the agent dir are updated and verified as usual. `/silent-update` reports, for example: `running inside an embedded Pi 0.87.1 at …; system Pi 1.1.0 at … is the one 'pi update --all' keeps updated`. This also keeps terminal Pi current while you work in pi-gui.
-- **Embedded Pi, no `pi` on `PATH`.** Packages and Pi alike could not be updated, so when something is out of date the extension records one clear failure — `no 'pi' command on PATH, so updates cannot run; install the Pi CLI or set PI_SILENT_UPDATE_CMD` — shown inside Pi like any other failure. With nothing to update it stays silent.
+- **No `pi` on `PATH`.** Nothing can be updated, so the extension checks the running copy as before and, when anything is out of date, records one clear failure — `no 'pi' command on PATH, so updates cannot run; install the Pi CLI or set PI_SILENT_UPDATE_CMD` — shown inside Pi like any other failure. With nothing to update it stays silent.
+
+Shell order decides which `pi` counts: the update command runs the bare `pi`, so the first executable `pi` on `PATH` is the one that matters. If it is a wrapper script or version-manager shim whose Pi install cannot be located from files (no `@earendil-works/pi-coding-agent` package above it), the extension cannot tell what the command updates and keeps the pre-extension behavior: the running copy is checked and verified as before.
 
 A custom `PI_SILENT_UPDATE_CMD` is trusted to target whatever it targets, so the decision above does not apply and behavior is unchanged.
 

@@ -19,7 +19,7 @@ import {
 	recordFailure,
 	releaseLock,
 	STALE_LOCK_MS,
-	systemPiDir,
+	systemPi,
 	throttleMs,
 	verify,
 	writeState,
@@ -160,37 +160,50 @@ test("verify: anything still older than the target is a failure", () => {
 	assert.deepEqual(verify({ items, command: "x" }, (i) => installed[i.path]), []);
 });
 
-test("systemPiDir: finds the Pi package behind a symlinked `pi` on PATH", () => {
+test("systemPi: finds the Pi package behind a symlinked `pi` on PATH", () => {
 	const root = tmp();
 	const pkg = makePi(root);
 	mkdirSync(join(root, "bin"));
 	symlinkSync(join(pkg, "dist", "cli.js"), join(root, "bin", "pi"));
 	const env = { PATH: [join(root, "bin"), "/definitely/not/on/path"].join(delimiter) };
-	assert.equal(systemPiDir(env, "linux"), realpathSync(pkg));
+	assert.deepEqual(systemPi(env, "linux"), { bin: join(realpathSync(pkg), "dist", "cli.js"), dir: realpathSync(pkg) });
 });
 
-test("systemPiDir: a `pi` that is not a Pi install is skipped; a real one later on PATH wins", () => {
+test("systemPi: shell PATH order — the first executable `pi` is the one the command runs, even when it is not a Pi install", () => {
 	const root = tmp();
 	mkdirSync(join(root, "bin"), { recursive: true });
-	writeFileSync(join(root, "bin", "pi"), "#!/bin/sh\n");
+	writeFileSync(join(root, "bin", "pi"), "#!/bin/sh\nexec not-pi\n");
 	chmodSync(join(root, "bin", "pi"), 0o755);
 	writeFileSync(join(root, "package.json"), JSON.stringify({ name: "not-pi", bin: { pi: "bin/pi" } }));
 	const pkg = makePi(root);
 	symlinkSync(join(pkg, "dist", "cli.js"), join(root, "lib", "pi"));
+	// `pi update --all` runs the bare `pi`, so the impostor first on PATH is what the shell runs;
+	// the later real Pi is never targeted, and no Pi package root can be resolved from the impostor.
 	const env = { PATH: [join(root, "bin"), join(root, "lib")].join(delimiter) };
-	assert.equal(systemPiDir(env, "linux"), realpathSync(pkg));
-	// Without the real Pi later on PATH, the impostor yields nothing.
-	assert.equal(systemPiDir({ PATH: join(root, "bin") }, "linux"), undefined);
+	assert.deepEqual(systemPi(env, "linux"), { bin: realpathSync(join(root, "bin", "pi")) });
+	// With the real Pi first on PATH, it resolves to its package root as usual.
+	assert.deepEqual(systemPi({ PATH: join(root, "lib") }, "linux"), { bin: join(realpathSync(pkg), "dist", "cli.js"), dir: realpathSync(pkg) });
 });
 
-test("systemPiDir: no `pi` anywhere on PATH returns undefined", () => {
-	assert.equal(systemPiDir({ PATH: join(tmp(), "missing-bin") }, "linux"), undefined);
-	assert.equal(systemPiDir({ PATH: "" }, "linux"), undefined);
+test("systemPi: a present `pi` with no Pi package above it (shim or wrapper) resolves `bin` only", () => {
+	const root = tmp();
+	mkdirSync(join(root, "bin"), { recursive: true });
+	writeFileSync(join(root, "bin", "pi"), "#!/bin/sh\n");
+	chmodSync(join(root, "bin", "pi"), 0o755);
+	// A non-Pi package.json above the shim (pnpm/volta/asdf style) must not resolve as the Pi root.
+	writeFileSync(join(root, "package.json"), JSON.stringify({ name: "shim-host" }));
+	assert.deepEqual(systemPi({ PATH: join(root, "bin") }, "linux"), { bin: realpathSync(join(root, "bin", "pi")) });
 });
 
-test("isEmbedded: running copy differs from the PATH Pi; a custom command is trusted", () => {
+test("systemPi: no `pi` anywhere on PATH returns undefined", () => {
+	assert.equal(systemPi({ PATH: join(tmp(), "missing-bin") }, "linux"), undefined);
+	assert.equal(systemPi({ PATH: "" }, "linux"), undefined);
+});
+
+test("isEmbedded: only a resolved system dir counts; a custom command is trusted", () => {
 	assert.equal(isEmbedded("/app/pi", {}, "/app/pi"), false);
 	assert.equal(isEmbedded("/app/pi", {}, "/system/pi"), true);
-	assert.equal(isEmbedded("/app/pi", {}, undefined), true);
+	// A `pi` present but unresolvable (shim) is NOT embedded: the running copy is checked as before.
+	assert.equal(isEmbedded("/app/pi", {}, undefined), false);
 	assert.equal(isEmbedded("/app/pi", { PI_SILENT_UPDATE_CMD: "my update cmd" }, "/system/pi"), false);
 });
