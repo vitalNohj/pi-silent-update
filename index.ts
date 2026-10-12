@@ -1,13 +1,14 @@
 // pi-silent-update: keep Pi and its packages current without Pi's update popups.
 // One file, no runtime dependencies. Pure helpers are exported for the tests.
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 export const STATE_FILE = "silent-update.json";
 export const LOCK_DIR = "silent-update.lock";
+export const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 export const STALE_LOCK_MS = 60 * 60 * 1000;
 const JOB_TIMEOUT_S = 15 * 60;
 const NET_TIMEOUT_MS = 10_000;
@@ -188,6 +189,62 @@ const readVersion = (dir: string) => {
 	}
 };
 
+/** realpath, or the path itself when it does not exist (yet). */
+export const realpathOr = (p: string): string => {
+	try {
+		return realpathSync(p);
+	} catch {
+		return p;
+	}
+};
+
+/**
+ * The `pi` that `/bin/sh -c "pi update --all"` runs: the FIRST executable `pi` in PATH order (shell
+ * order — a non-Pi `pi` earlier on PATH is the one the command runs, so a later Pi is never targeted).
+ * `bin` is its realpath; `dir` is the nearest `@earendil-works/pi-coding-agent` package root above it
+ * when there is one. Shims and wrapper scripts (pnpm/volta/asdf/nvm) often have none — then the Pi
+ * install the command updates cannot be located from files alone and `dir` stays undefined. File
+ * lookups only, no child processes.
+ */
+export interface SystemPi {
+	bin: string;
+	dir?: string;
+}
+export function systemPi(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform): SystemPi | undefined {
+	for (const dir of (env.PATH ?? "").split(delimiter)) {
+		if (!dir) continue;
+		const bin = join(dir, platform === "win32" ? "pi.cmd" : "pi");
+		let resolved: string;
+		try {
+			if (!statSync(bin).isFile()) continue;
+			accessSync(bin, constants.X_OK);
+			resolved = realpathSync(bin);
+		} catch {
+			continue;
+		}
+		for (let cur = dirname(resolved);;) {
+			try {
+				if (JSON.parse(readFileSync(join(cur, "package.json"), "utf8")).name === PI_PACKAGE_NAME) return { bin: resolved, dir: cur };
+			} catch {}
+			const up = dirname(cur);
+			if (up === cur) return { bin: resolved };
+			cur = up;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * True when the default command runs a Pi install that is not the running copy: an embedded Pi, such
+ * as the copy a desktop app like pi-gui bundles and runs from the shared agent dir. Only a resolved
+ * system dir counts — with no `pi` on PATH, or a `pi` whose install cannot be resolved (a shim), the
+ * pre-extension behavior applies instead (the running copy is checked and verified as before). A
+ * custom PI_SILENT_UPDATE_CMD is trusted to target whatever it targets, so it keeps today's behavior.
+ */
+export function isEmbedded(piDir: string, env: NodeJS.ProcessEnv = process.env, systemDir?: string): boolean {
+	return !env.PI_SILENT_UPDATE_CMD && !!systemDir && systemDir !== realpathOr(piDir);
+}
+
 async function gitTarget(path: string): Promise<{ head: string; remote: string }> {
 	const head = await run("git", ["rev-parse", "HEAD"], { cwd: path, timeout: NET_TIMEOUT_MS });
 	const upstream = await run("git", ["rev-parse", "--abbrev-ref", "@{upstream}"], { cwd: path }).catch(() => "");
@@ -198,18 +255,24 @@ async function gitTarget(path: string): Promise<{ head: string; remote: string }
 	return { head, remote };
 }
 
-/** Find everything newer than what is installed, using Pi's own package rules. No npm processes. */
-async function findUpdates(pc: Pc, cwd: string, agentDir: string): Promise<{ items: Item[]; errors: string[] }> {
+/** Find everything newer than what is installed, using Pi's own package rules. No npm processes.
+ *  `systemDir` is the Pi install `pi update --all` updates (see systemPi); when the running Pi is
+ *  an embedded copy, the Pi item (and so the later verification) targets the system install instead. */
+async function findUpdates(pc: Pc, cwd: string, agentDir: string, systemDir?: string): Promise<{ items: Item[]; errors: string[] }> {
 	const items: Item[] = [];
 	const errors: string[] = [];
 	const checks: Promise<void>[] = [];
 	const piDir = pc.getPackageDir();
+	const embedded = isEmbedded(piDir, process.env, systemDir);
+	// The command never touches an embedded copy (its app updates it), so only a system install gets an item.
+	const piTargetDir = embedded ? (systemDir ?? piDir) : piDir;
 	// Compare against the version on disk, so a session started before an update does not re-run it.
-	const piNow = readVersion(piDir) ?? pc.VERSION;
+	// (Embedded implies a resolved systemDir, so piTargetDir is always the copy the command updates.)
+	const piNow = readVersion(piTargetDir) ?? pc.VERSION;
 	checks.push(
 		getJson("https://pi.dev/api/latest-version").then((d) => {
 			if (typeof d?.version !== "string") throw new Error("pi.dev returned no version");
-			if (compareVersions(d.version, piNow) > 0) items.push({ name: "pi", kind: "pi", from: piNow, to: d.version, path: piDir });
+			if (piNow && compareVersions(d.version, piNow) > 0) items.push({ name: "pi", kind: "pi", from: piNow, to: d.version, path: piTargetDir });
 		}, (e) => void errors.push(`checking pi: ${e.message}`)),
 	);
 	const trusted = new pc.ProjectTrustStore(agentDir).get(cwd) === true; // same rule as `pi update`
@@ -364,10 +427,18 @@ export default async function silentUpdate(pi: any) {
 		const now = Date.now();
 		if (!isDue(state, now, throttleMs(), force)) return;
 		writeState(agentDir, { lastCheck: now });
-		const { items, errors } = await findUpdates(pc, sh.ctx?.cwd ?? process.cwd(), agentDir);
+		// Only look for the system Pi once a check is actually due; an ordinary start stays one file read.
+		const sys = process.env.PI_SILENT_UPDATE_CMD ? undefined : systemPi();
+		const { items, errors } = await findUpdates(pc, sh.ctx?.cwd ?? process.cwd(), agentDir, sys?.dir);
+		// Only a missing `pi` executable makes the command impossible; a present-but-unresolvable
+		// `pi` (a shim) keeps the pre-extension behavior: the running copy is checked and verified.
+		if (items.length && !process.env.PI_SILENT_UPDATE_CMD && !sys)
+			return fail(["no `pi` command on PATH, so updates cannot run; install the Pi CLI or set PI_SILENT_UPDATE_CMD"]);
 		if (!items.length) {
 			if (errors.length) return fail(errors);
-			if (state.failures?.length && lockState(agentDir) === "absent") {
+			// A leftover lock (a job that never finished, or another session's) does not change that
+			// nothing is outdated now; the recorded failure must still clear on this successful check.
+			if (state.failures?.length) {
 				clearFailure(agentDir, "up to date");
 				showFailure();
 				say("pi-silent-update: the earlier update problem is resolved; everything is up to date");
@@ -420,8 +491,20 @@ export default async function silentUpdate(pi: any) {
 			await start(true);
 			const s = readState(agentDir);
 			const at = (t?: number) => (t ? new Date(t).toLocaleString() : "never");
+			const runningDir = realpathOr(pc.getPackageDir());
+			const sys = process.env.PI_SILENT_UPDATE_CMD ? undefined : systemPi();
+			const piLine = process.env.PI_SILENT_UPDATE_CMD
+				? `running Pi ${pc.VERSION} at ${runningDir}; updates run with \`${command}\` (PI_SILENT_UPDATE_CMD)`
+				: !sys
+					? `running Pi ${pc.VERSION} at ${runningDir}; no \`pi\` command on PATH, so no Pi copy can be updated`
+					: !sys.dir
+						? `running Pi ${pc.VERSION} at ${runningDir}; \`${command}\` runs ${sys.bin}, whose Pi install cannot be located from files`
+						: sys.dir === runningDir
+							? `running the system Pi ${pc.VERSION} at ${runningDir}; it is the one \`${command}\` keeps updated`
+							: `running inside an embedded Pi ${pc.VERSION} at ${runningDir}; system Pi ${readVersion(sys.dir) ?? "unknown"} at ${sys.dir} is the one \`${command}\` keeps updated`;
 			const lines = [
 				`pi-silent-update - state in ${join(agentDir, STATE_FILE)}`,
+				piLine,
 				`last check: ${at(s.lastCheck)}; last update started: ${at(s.lastAttempt)}`,
 				`last result: ${s.lastResult ?? "none"}`,
 				lockState(agentDir) === "absent" ? "" : `update in progress (lock: ${lockDir})`,
